@@ -2,18 +2,21 @@ import torch
 
 import triton
 import triton.language as tl
+from numba import cuda
+import numpy as np
+from utils.benchmarks import benchmark_and_verify
 
 
 DEVICE = triton.runtime.driver.active.get_active_torch_device()
 
 
 @triton.jit
-def transpose_kernel(in_ptr,
-                     output_ptr,
-                     num_rows,
-                     num_cols,
-                     block_x : tl.constexpr,
-                     block_y : tl.constexpr):
+def transpose_triton_kernel(in_ptr,
+                            output_ptr,
+                            num_rows,
+                            num_cols,
+                            block_x : tl.constexpr,
+                            block_y : tl.constexpr):
     pid_x = tl.program_id(axis=0)
     pid_y = tl.program_id(axis=1)
 
@@ -41,38 +44,38 @@ def transpose_kernel(in_ptr,
 
     tl.store(output_block_ptr, block)
 
-def transpose_wrapper(x: torch.Tensor):
+
+def transpose_triton_wrapper(x: torch.Tensor) -> torch.Tensor:
     # We need to preallocate the output.
     output = torch.zeros(x.shape).to(device=DEVICE)
 
-    stride_in_row = x.stride(0)
-    stride_in_col = x.stride(1)
-    print(stride_in_row, " @! ", stride_in_col)
-
     block_size = [32, 32]
+    m = x.shape[0]
+    n = x.shape[1]
     
     grid = lambda meta: (triton.cdiv(x.shape[0], block_size[0]), triton.cdiv(x.shape[1], block_size[1]))
 
-    transpose_kernel[grid](x, output, m, n, block_size[0], block_size[1])
+    transpose_triton_kernel[grid](x, output, m, n, block_size[0], block_size[1])
 
     return output
 
 
-# %%
-# We can now use the above function to compute the element-wise sum of two `torch.tensor` objects and test its correctness:
+def transpose_torch_wrapper(x: torch.Tensor) -> torch.Tensor:
+    return x.t()
 
-torch.manual_seed(0)
 
-m = 72
-n = 72
-x = torch.rand([m, n], device=DEVICE)
+def main():
+    torch.manual_seed(0)
 
-print(x.shape)
+    m = 2048
+    n = 2048
+    x = torch.rand([m, n], device=DEVICE)
 
-output_torch = torch.transpose(x, 0, 1)
-output_triton = transpose_wrapper(x)
+    print("running torch: ")
+    benchmark_and_verify(transpose_torch_wrapper, x)
 
-print(output_torch.shape)
+    print("\nrunning triton: ")
+    benchmark_and_verify(transpose_triton_wrapper, x)
 
-print(f'The maximum difference between torch and triton is '
-      f'{torch.max(torch.abs(output_torch - output_triton))}')
+
+main()
