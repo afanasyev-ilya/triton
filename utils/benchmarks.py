@@ -1,7 +1,6 @@
 import torch
 import triton
 import triton.language as tl
-from numba import cuda
 import numpy as np
 
 
