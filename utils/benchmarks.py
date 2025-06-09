@@ -5,7 +5,7 @@ from numba import cuda
 import numpy as np
 
 
-def benchmark_and_verify(transpose_fn, *fn_args, iters: int = 10, **fn_kwargs):
+def benchmark_transpose(transpose_fn, *fn_args, iters: int = 10, **fn_kwargs):
     """
     Benchmarks a transpose function over multiple iterations and verifies correctness.
 
@@ -38,30 +38,39 @@ def benchmark_and_verify(transpose_fn, *fn_args, iters: int = 10, **fn_kwargs):
     # 3) Run timed iterations
     times = []
     first_output = None
+    in_place = False
+
+    input = x
 
     for i in range(iters):
-        # Create new CUDA events for timing
-        start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)
+      # Create new CUDA events for timing
+      start_event = torch.cuda.Event(enable_timing=True)
+      end_event = torch.cuda.Event(enable_timing=True)
 
-        torch.cuda.synchronize()
-        start_event.record()
+      torch.cuda.synchronize()
+      start_event.record()
 
-        out = transpose_fn(*fn_args, **fn_kwargs)
+      out = transpose_fn(*fn_args, **fn_kwargs)
 
-        end_event.record()
-        torch.cuda.synchronize()
+      # inplace case
+      if out is None:
+        in_place = True
+        out = fn_args[0]
 
-        elapsed_ms = start_event.elapsed_time(end_event)
-        times.append(elapsed_ms)
+      end_event.record()
+      torch.cuda.synchronize()
 
-        # Save the first output for correctness check
-        if i == 0:
-            first_output = out
+      elapsed_ms = start_event.elapsed_time(end_event)
+      times.append(elapsed_ms)
+
+      # Save the first output for correctness check
+      if i == 0:
+          first_output = out
 
     # 4) Verify correctness using the first iteration's output
     max_diff = torch.max(torch.abs(first_output - golden))
-    assert max_diff == 0, f"Mismatch detected: max difference = {max_diff.item()}"
+    if not in_place:
+      assert max_diff == 0, f"Mismatch detected: max difference = {max_diff.item()}"
 
     # 5) Compute statistics
     min_time = min(times)

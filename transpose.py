@@ -4,7 +4,7 @@ import triton
 import triton.language as tl
 from numba import cuda
 import numpy as np
-from utils.benchmarks import benchmark_and_verify
+from utils.benchmarks import benchmark_transpose
 
 
 DEVICE = triton.runtime.driver.active.get_active_torch_device()
@@ -45,6 +45,51 @@ def transpose_triton_kernel(in_ptr,
     tl.store(output_block_ptr, block)
 
 
+@triton.jit
+def inplace_transpose(in_ptr, num_rows, num_cols,
+                      block_x: tl.constexpr, block_y: tl.constexpr):
+    pid_x = tl.program_id(0)
+    pid_y = tl.program_id(1)
+
+    # diagonal
+    if pid_x == pid_y:
+        ptr = tl.make_block_ptr(in_ptr,
+                                (num_rows, num_cols),
+                                (num_rows, 1),
+                                (pid_x*block_x, pid_y*block_y),
+                                (block_x, block_y),
+                                order=(0,1))
+        blk = tl.load(ptr)
+
+        blk = blk.T
+
+        tl.store(ptr, blk)
+    else:
+        # Вне диагонали: обмениваем (i,j) и (j,i) один раз
+        # Загружаем блок A = (i,j)
+        ptr_a = tl.make_block_ptr(in_ptr,
+                                (num_rows, num_cols),
+                                (num_rows, 1),
+                                (pid_x*block_x, pid_y*block_y),
+                                (block_x, block_y),
+                                order=(0,1))
+        A = tl.load(ptr_a)
+
+        # Загружаем блок B = (j,i)
+        ptr_b = tl.make_block_ptr(in_ptr,
+                                (num_rows, num_cols),
+                                (num_rows, 1),
+                                (pid_y*block_x, pid_x*block_y),
+                                (block_x, block_y),
+                                order=(0,1))
+        B = tl.load(ptr_b)
+
+        # Записываем Aᵀ в положение B и Bᵀ в положение A
+        tl.store(ptr_b, A.T)
+        tl.store(ptr_a, B.T)
+
+
+
 def transpose_triton_wrapper(x: torch.Tensor) -> torch.Tensor:
     # We need to preallocate the output.
     output = torch.zeros(x.shape).to(device=DEVICE)
@@ -60,6 +105,16 @@ def transpose_triton_wrapper(x: torch.Tensor) -> torch.Tensor:
     return output
 
 
+def inplace_transpose_triton_wrapper(x: torch.Tensor) -> torch.Tensor:
+    block_size = [32, 32]
+    m = x.shape[0]
+    n = x.shape[1]
+    
+    grid = lambda meta: (triton.cdiv(x.shape[0], block_size[0]), triton.cdiv(x.shape[1], block_size[1]))
+
+    inplace_transpose[grid](x, m, n, block_size[0], block_size[1])
+
+
 def transpose_torch_wrapper(x: torch.Tensor) -> torch.Tensor:
     return x.t()
 
@@ -67,15 +122,19 @@ def transpose_torch_wrapper(x: torch.Tensor) -> torch.Tensor:
 def main():
     torch.manual_seed(0)
 
-    m = 2048
-    n = 2048
+    size = 4096
+    m = size
+    n = size
     x = torch.rand([m, n], device=DEVICE)
 
     print("running torch: ")
-    benchmark_and_verify(transpose_torch_wrapper, x)
+    benchmark_transpose(transpose_torch_wrapper, x)
 
     print("\nrunning triton: ")
-    benchmark_and_verify(transpose_triton_wrapper, x)
+    benchmark_transpose(transpose_triton_wrapper, x)
+
+    print("\nInplace triton: ")
+    benchmark_transpose(inplace_transpose_triton_wrapper, x)
 
 
 main()
